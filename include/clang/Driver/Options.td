@@ -329,6 +329,8 @@ def fcolor_diagnostics : Flag<["-"], "fcolor-diagnostics">, Group<f_Group>, Flag
   HelpText<"Use colors in diagnostics">;
 def fioc_signed : Flag <["-"], "fioc-signed">, Flags<[CC1Option]>,
   Group<f_Group>, HelpText<"Generate runtime checks for signed integer overflows.">;
+def fioc_unsigned : Flag <["-"], "fioc-unsigned">, Flags<[CC1Option]>,
+  Group<f_Group>, HelpText<"Generate runtime checks for unsigned integer overflows.">;
 def fioc_shifts : Flag <["-"], "fioc-shifts">, Flags<[CC1Option]>,
   Group<f_Group>, HelpText<"Generate runtime checks for shifting more than bitwidth">;
 def fioc_strict_shifts : Flag <["-"], "fioc-strict-shifts">, Flags<[CC1Option]>,
