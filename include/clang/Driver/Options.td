@@ -333,6 +333,8 @@ def fioc_shifts : Flag <["-"], "fioc-shifts">, Flags<[CC1Option]>,
   Group<f_Group>, HelpText<"Generate runtime checks for shifting more than bitwidth">;
 def fioc_strict_shifts : Flag <["-"], "fioc-strict-shifts">, Flags<[CC1Option]>,
   Group<f_Group>, HelpText<"Generate runtime checks for stricter C99/C++11 shift rules">;
+def fioc_abort_on_error : Flag <["-"], "fioc-abort-on-error">, Flags<[CC1Option]>,
+  Group<f_Group>, HelpText<"Abort program execution if an IOC check triggers">;
 def fcommon : Flag<["-"], "fcommon">, Group<f_Group>;
 def fcompile_resource_EQ : Joined<["-"], "fcompile-resource=">, Group<f_Group>;
 def fconstant_cfstrings : Flag<["-"], "fconstant-cfstrings">, Group<f_Group>;

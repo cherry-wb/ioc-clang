@@ -2219,8 +2219,13 @@ void CodeGenFunction::EmitIOCCheck(llvm::Value *Checked,
   // And finally emit a call the appropriate runtime function
   Builder.CreateCall(RTFunc, Args);
 
-  // TODO: Make continue/unreachable a user-configurable option?
-  Builder.CreateBr(Cont);
+  if (getLangOpts().IOCAbortOnError) {
+    llvm::Function *Trap = CGM.getIntrinsic(llvm::Intrinsic::trap);
+    Builder.CreateCall(Trap);
+    Builder.CreateUnreachable();
+  }
+  else
+    Builder.CreateBr(Cont);
 
   EmitBlock(Cont);
 }
