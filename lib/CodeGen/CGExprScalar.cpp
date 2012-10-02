@@ -440,6 +440,12 @@ public:
   // Check for undefined division and modulus behaviors.
   void EmitUndefinedBehaviorIntegerDivAndRemCheck(const BinOpInfo &Ops, 
                                                   llvm::Value *Zero,bool isDiv);
+  /// TryEmitCheckedCast - If applicible, emit a checked cast and return
+  /// the result.  Returns NULL otherwise.
+  /// Used to handle -fioc-{implicit,explicit}-conversion flags.
+  Value *TryEmitCheckedCast(CastExpr *CE);
+  void EmitIntegerCastCheck(Value *Src, QualType SrcType, QualType DstType,
+                            const Expr *E);
   Value *EmitDiv(const BinOpInfo &Ops);
   Value *EmitRem(const BinOpInfo &Ops);
   Value *EmitAdd(const BinOpInfo &Ops);
@@ -1206,6 +1212,8 @@ Value *ScalarExprEmitter::VisitCastExpr(CastExpr *CE) {
   if (!DestTy->isVoidType())
     TestAndClearIgnoreResultAssign();
 
+  if (Value *Result = TryEmitCheckedCast(CE)) return Result;
+
   // Since almost all cast kinds apply to scalars, this switch doesn't have
   // a default case, so the compiler will warn on a missing case.  The cases
   // are in the same order as in the CastKind enum.
@@ -1501,8 +1509,11 @@ ScalarExprEmitter::EmitScalarPrePostIncDec(const UnaryOperator *E, LValue LV,
             CGF.IntTy->getBitWidth())
       value = EmitAddConsiderOverflowBehavior(E, value, amt, isInc);
     else {
-      if (CGF.getContext().getLangOpts().IOCUnsignedOverflowChecks &&
-           type->isUnsignedIntegerType()) {
+      if ((CGF.getContext().getLangOpts().IOCUnsignedOverflowChecks &&
+           type->isUnsignedIntegerType()) ||
+          (CGF.getContext().getLangOpts().IOCImplicitConversionChecks &&
+           (value->getType()->getPrimitiveSizeInBits() <
+              CGF.IntTy->getBitWidth()))) {
         int tmpamount = 1;
         llvm::Value *tmpamt = llvm::ConstantInt::get(value->getType(),
                                                      tmpamount);
@@ -1982,10 +1993,10 @@ void ScalarExprEmitter::EmitUndefinedBehaviorIntegerDivAndRemCheck(
     llvm::Value *Cond2 = Builder.CreateOr(LHSCmp, RHSCmp, "or");
     llvm::Value *Checked = Builder.CreateAnd(Cond1, Cond2, "and");
     if (CGF.CGM.getLangOpts().IOCSignedOverflowChecks)
-      CGF.EmitIOCCheck(Checked,
-                       isDiv ? CodeGenFunction::IOC_DIV_ERROR :
-                               CodeGenFunction::IOC_REM_ERROR,
-                       Ops.E, Ops.LHS, Ops.RHS, true /* isSigned */);
+      CGF.EmitIOCBinOpCheck(Checked,
+                            isDiv ? CodeGenFunction::IOC_DIV_ERROR :
+                                    CodeGenFunction::IOC_REM_ERROR,
+                            Ops.E, Ops.LHS, Ops.RHS, true /* isSigned */);
     else
       EmitBinOpCheck(Checked, Ops);
   } else {
@@ -2120,6 +2131,129 @@ Value *ScalarExprEmitter::EmitOverflowCheckedBinOp(const BinOpInfo &Ops) {
   return phi;
 }
 
+static void getTypeRange(llvm::IntegerType *T, bool isSigned,
+                         llvm::APInt& Min, llvm::APInt& Max) {
+  unsigned w = T->getBitWidth();
+  assert(w == T->getScalarSizeInBits());
+  if (isSigned) {
+    Min = llvm::APInt::getSignedMinValue(w);
+    Max = llvm::APInt::getSignedMaxValue(w);
+  } else {
+    Min = llvm::APInt::getMinValue(w);
+    Max = llvm::APInt::getMaxValue(w);
+  }
+}
+
+Value *ScalarExprEmitter::TryEmitCheckedCast(CastExpr *CE) {
+  // Bail early if not an integer type, or no conversion checking flags set.
+  if (!CE->getType()->isIntegerType() ||
+      (!CGF.getLangOpts().IOCImplicitConversionChecks &&
+       !CGF.getLangOpts().IOCExplicitConversionChecks))
+    return 0;
+
+  Expr *Src = 0;
+  if (CE->getCastKind() == CK_IntegralCast)
+    Src = CE->getSubExpr();
+  else if (isa<ExplicitCastExpr>(CE) &&
+           CE->getCastKind() == CK_NoOp) {
+    // Artifact of C++ AST: Useful explicit casts
+    // become NoOp's with their work done by
+    // nested implicit cast nodes.
+    // We want to treat them as a single (explicit) cast,
+    // so peer into the subexpression to check for this:
+    if (ImplicitCastExpr *ICE = dyn_cast<ImplicitCastExpr>(CE->getSubExpr()))
+      if (ICE->getCastKind() == CK_IntegralCast)
+        Src = ICE->getSubExpr();
+  }
+  if (!Src) return 0;
+
+  // Evaluate the source of the cast operation.
+  Value * EV = Visit(Src);
+
+  // Note that we get this far if we're checking either implicit or
+  // explicit conversions, but not necessarily checking for the kind
+  // listed here.  This is important, so that classification of the cast
+  // (and its children) is done correctly.
+  if ((CGF.getLangOpts().IOCImplicitConversionChecks &&
+      isa<ImplicitCastExpr>(CE)) ||
+      (CGF.getLangOpts().IOCExplicitConversionChecks &&
+      isa<ExplicitCastExpr>(CE)))
+    EmitIntegerCastCheck(EV, Src->getType(), CE->getType(), Src);
+  return EmitScalarConversion(EV, Src->getType(), CE->getType());
+}
+
+void ScalarExprEmitter::EmitIntegerCastCheck(Value *Src, QualType SrcType,
+                                             QualType DstType, const Expr *E) {
+  assert(CGF.getContext().getLangOpts().IOCImplicitConversionChecks ||
+         CGF.getContext().getLangOpts().IOCExplicitConversionChecks);
+
+  llvm::IntegerType *SrcTy = cast<llvm::IntegerType>(ConvertType(SrcType));
+  llvm::IntegerType *DstTy = cast<llvm::IntegerType>(ConvertType(DstType));
+  assert(SrcTy == Src->getType());
+
+  // Compute min/max values for the respective types
+  llvm::APInt SrcMin, SrcMax;
+  llvm::APInt DstMin, DstMax;
+  bool SrcSigned = SrcType->isSignedIntegerOrEnumerationType();
+  bool DstSigned = DstType->isSignedIntegerOrEnumerationType();
+  getTypeRange(SrcTy, SrcSigned, SrcMin, SrcMax);
+  getTypeRange(DstTy, DstSigned, DstMin, DstMax);
+
+  // Extend ranges so they can be compared
+  unsigned MaxWidth = std::max(SrcTy->getBitWidth(), DstTy->getBitWidth()) + 1;
+  SrcMin = SrcSigned ? SrcMin.sext(MaxWidth) : SrcMin.zext(MaxWidth);
+  SrcMax = SrcSigned ? SrcMax.sext(MaxWidth) : SrcMax.zext(MaxWidth);
+  DstMin = DstSigned ? DstMin.sext(MaxWidth) : DstMin.zext(MaxWidth);
+  DstMax = DstSigned ? DstMax.sext(MaxWidth) : DstMax.zext(MaxWidth);
+
+  // And compare to determine which range ends need to be checked
+  bool checkMin = DstMin.sgt(SrcMin);
+  bool checkMax = DstMax.slt(SrcMax);
+
+  // Emit checks for these as necessary:
+  Value *CastCheckResult = NULL;
+  if (checkMin) {
+    llvm::ConstantInt *MinCompare =
+      llvm::ConstantInt::get(VMContext, DstMin.trunc(SrcTy->getBitWidth()));
+    assert(SrcSigned && "Unsigned min (zero) >= minimum of all other types");
+    Value *Check = SrcSigned ?
+                       Builder.CreateICmpSLT(Src, MinCompare, "smincheck") :
+                       Builder.CreateICmpULT(Src, MinCompare, "umincheck");
+    CastCheckResult = Check;
+  }
+  if (checkMax) {
+    llvm::ConstantInt *MaxCompare =
+      llvm::ConstantInt::get(VMContext, DstMax.trunc(SrcTy->getBitWidth()));
+    Value *Check = SrcSigned ?
+                       Builder.CreateICmpSGT(Src, MaxCompare, "smaxcheck") :
+                       Builder.CreateICmpUGT(Src, MaxCompare, "umaxcheck");
+    CastCheckResult = CastCheckResult ?
+                        Builder.CreateOr(CastCheckResult, Check) :
+                        Check;
+  }
+
+  // If we emitted a check...
+  if (checkMin || checkMax) {
+    assert(CastCheckResult);
+
+    // Emit call to the IOC runtime describing the failed cast
+    QualType CanonSrcType = CGF.getContext().getCanonicalType(SrcType);
+    QualType CanonDstType = CGF.getContext().getCanonicalType(DstType);
+
+    SmallVector<Value*, 4> Args;
+    Args.push_back(Builder.CreateGlobalStringPtr(SrcType.getAsString()));
+    Args.push_back(Builder.CreateGlobalStringPtr(CanonSrcType.getAsString()));
+    Args.push_back(Builder.CreateGlobalStringPtr(DstType.getAsString()));
+    Args.push_back(Builder.CreateGlobalStringPtr(CanonDstType.getAsString()));
+    Args.push_back(Builder.CreateIntCast(Src, CGF.Int64Ty, SrcSigned));
+    Args.push_back(llvm::ConstantInt::get(CGF.Int8Ty, SrcSigned));
+
+    CGF.EmitIOCCheck(CastCheckResult,
+                     CodeGenFunction::IOC_CONVERSION, E->getExprLoc(),
+                     Args);
+  }
+}
+
 Value *ScalarExprEmitter::EmitIOCBinOp(const BinOpInfo &Ops) {
 
   // Find appropriate intrinsic and ioc check type for this operation
@@ -2158,18 +2292,16 @@ Value *ScalarExprEmitter::EmitIOCBinOp(const BinOpInfo &Ops) {
   Value *overflow = Builder.CreateExtractValue(resultAndOverflow, 1);
 
   // Branch to overflowBB in case of overflow
-  CGF.EmitIOCCheck(Builder.CreateNot(overflow), IOCCT, Ops.E, Ops.LHS, Ops.RHS,
-                   Ops.E->getType()->isSignedIntegerOrEnumerationType());
+  CGF.EmitIOCBinOpCheck(Builder.CreateNot(overflow), IOCCT, Ops.E,
+                        Ops.LHS, Ops.RHS,
+                        Ops.E->getType()->isSignedIntegerOrEnumerationType());
   return result;
 }
 
 void CodeGenFunction::EmitIOCCheck(llvm::Value *Checked,
                                    CodeGenFunction::IOCCheckType IOCCT,
-                                   const Expr *E,
-                                   Value *LHS,
-                                   Value *RHS,
-                                   bool Signed) {
-
+                                   SourceLocation SL,
+                                   ArrayRef<llvm::Value*> ExtraArgs) {
   llvm::BasicBlock *Cont = createBasicBlock("cont");
   llvm::BasicBlock *RTCallBB = createBasicBlock("ioc_bb");
 
@@ -2180,7 +2312,6 @@ void CodeGenFunction::EmitIOCCheck(llvm::Value *Checked,
   unsigned Line, Column;
   StringRef FileName;
   {
-    SourceLocation SL = E->getExprLoc();
     assert(SL.isValid());
 
     SourceManager &SM = getContext().getSourceManager();
@@ -2191,32 +2322,14 @@ void CodeGenFunction::EmitIOCCheck(llvm::Value *Checked,
     FileName = PLoc.getFilename();
   }
 
-  // Create string for this expression.
-  // For now just get the opcode string, would be nice to
-  // generate a much prettier string containing the snippet
-  // or even more sophisticated caret-style using diagnostics.
-  SmallString<15> OpcodeStr = StringRef("<unknown>");
-  {
-    if (const BinaryOperator* BO = dyn_cast<BinaryOperator>(E))
-      OpcodeStr = BO->getOpcodeStr();
-    else if (const UnaryOperator * UO = dyn_cast<UnaryOperator>(E)) {
-      OpcodeStr = StringRef("unary ");
-      OpcodeStr += UnaryOperator::getOpcodeStr(UO->getOpcode());
-    }
-  }
-
-  // Build up the arguments
+  // Build the arguments:
   SmallVector<llvm::Value*, 8> Args;
   Args.push_back(llvm::ConstantInt::get(Int32Ty, Line));
   Args.push_back(llvm::ConstantInt::get(Int32Ty, Column));
   Args.push_back(Builder.CreateGlobalStringPtr(FileName));
-  Args.push_back(Builder.CreateGlobalStringPtr(OpcodeStr));
-  Args.push_back(Signed ? Builder.CreateSExt(LHS, Int64Ty) :
-                          Builder.CreateZExt(LHS, Int64Ty));
-  Args.push_back(Signed ? Builder.CreateSExt(RHS, Int64Ty) :
-                          Builder.CreateZExt(RHS, Int64Ty));
-  Args.push_back(getIOCEncodedType(LHS->getType(), Signed));
-  assert(LHS->getType() == RHS->getType());
+
+  // Add the given check-specific arguments
+  Args.insert(Args.end(), ExtraArgs.begin(), ExtraArgs.end());
 
   // Find the runtime function
   llvm::Value *RTFunc;
@@ -2231,14 +2344,14 @@ void CodeGenFunction::EmitIOCCheck(llvm::Value *Checked,
     case IOC_SHL_BITWIDTH: RTFuncName = "__ioc_report_shl_bitwidth"; break;
     case IOC_SHL_STRICT:   RTFuncName = "__ioc_report_shl_strict"; break;
     case IOC_SHR_BITWIDTH: RTFuncName = "__ioc_report_shr_bitwidth"; break;
+    case IOC_CONVERSION:   RTFuncName = "__ioc_report_conversion"; break;
     }
-    llvm::Type* ArgTypes[] = {
-      Int32Ty, Int32Ty, /* Line, Column */
-      Int8PtrTy,        /* Filename */
-      Int8PtrTy,        /* Expression String */
-      Int64Ty, Int64Ty, /* LHS, RHS */
-      Int8Ty            /* Operand Type */
-    };
+
+    SmallVector<llvm::Type*, 8> ArgTypes;
+    for (SmallVectorImpl<Value*>::iterator I = Args.begin(), E = Args.end();
+         I != E; ++I)
+      ArgTypes.push_back((*I)->getType());
+
     llvm::FunctionType *RTFuncTy =
       llvm::FunctionType::get(VoidTy, ArgTypes, false);
 
@@ -2258,6 +2371,38 @@ void CodeGenFunction::EmitIOCCheck(llvm::Value *Checked,
     Builder.CreateBr(Cont);
 
   EmitBlock(Cont);
+}
+
+void CodeGenFunction::EmitIOCBinOpCheck(llvm::Value *Checked,
+                                        CodeGenFunction::IOCCheckType IOCCT,
+                                        const Expr *E,
+                                        Value *LHS, Value *RHS,
+                                        bool Signed) {
+  // Create string for this expression.
+  // For now just get the opcode string, would be nice to
+  // generate a much prettier string containing the snippet
+  // or even more sophisticated caret-style using diagnostics.
+  SmallString<15> OpcodeStr = StringRef("<unknown>");
+  {
+    if (const BinaryOperator* BO = dyn_cast<BinaryOperator>(E))
+      OpcodeStr = BO->getOpcodeStr();
+    else if (const UnaryOperator * UO = dyn_cast<UnaryOperator>(E)) {
+      OpcodeStr = StringRef("unary ");
+      OpcodeStr += UnaryOperator::getOpcodeStr(UO->getOpcode());
+    } else {
+      llvm_unreachable("Unexpected Expr passed to EmitIOCBinOpCheck!");
+    }
+  }
+
+  // Build up check-specific arguments
+  SmallVector<llvm::Value*, 8> Args;
+  Args.push_back(Builder.CreateGlobalStringPtr(OpcodeStr));
+  Args.push_back(Builder.CreateIntCast(LHS, Int64Ty, Signed));
+  Args.push_back(Builder.CreateIntCast(RHS, Int64Ty, Signed));
+  Args.push_back(getIOCEncodedType(LHS->getType(), Signed));
+  assert(LHS->getType() == RHS->getType());
+
+  EmitIOCCheck(Checked, IOCCT, E->getExprLoc(), Args);
 }
 
 llvm::Value *CodeGenFunction::getIOCEncodedType(llvm::Type *T, bool isSigned) {
@@ -2575,10 +2720,10 @@ Value *ScalarExprEmitter::EmitShl(const BinOpInfo &Ops) {
     // twice.
     llvm::Value *Checked = Builder.CreateICmpULE(RHS, WidthMinusOne);
     if (IOCShift || IOCStrictShift)
-      CGF.EmitIOCCheck(Checked,
-                       CodeGenFunction::IOC_SHL_BITWIDTH,
-                       Ops.E, Ops.LHS, RHS,
-                       Ops.Ty->hasSignedIntegerRepresentation());
+      CGF.EmitIOCBinOpCheck(Checked,
+                            CodeGenFunction::IOC_SHL_BITWIDTH,
+                            Ops.E, Ops.LHS, RHS,
+                            Ops.Ty->hasSignedIntegerRepresentation());
     else
       EmitBinOpCheck(Checked, Ops);
 
@@ -2602,9 +2747,9 @@ Value *ScalarExprEmitter::EmitShl(const BinOpInfo &Ops) {
       llvm::Value *Zero = llvm::ConstantInt::get(BitsShiftedOff->getType(), 0);
       llvm::Value *Checked = Builder.CreateICmpEQ(BitsShiftedOff, Zero);
       if (IOCStrictShift)
-        CGF.EmitIOCCheck(Checked,
-                         CodeGenFunction::IOC_SHL_STRICT, Ops.E, Ops.LHS,
-                         RHS, Ops.Ty->hasSignedIntegerRepresentation());
+        CGF.EmitIOCBinOpCheck(Checked,
+                              CodeGenFunction::IOC_SHL_STRICT, Ops.E, Ops.LHS,
+                              RHS, Ops.Ty->hasSignedIntegerRepresentation());
       else
         EmitBinOpCheck(Checked, Ops);
     }
@@ -2628,10 +2773,10 @@ Value *ScalarExprEmitter::EmitShr(const BinOpInfo &Ops) {
     llvm::Value *WidthVal = llvm::ConstantInt::get(RHS->getType(), Width);
     llvm::Value *Checked = Builder.CreateICmpULT(RHS, WidthVal);
     if (IOCShiftCheck) {
-      CGF.EmitIOCCheck(Checked,
-                       CodeGenFunction::IOC_SHR_BITWIDTH,
-                       Ops.E, Ops.LHS, RHS,
-                       Ops.Ty->hasSignedIntegerRepresentation());
+      CGF.EmitIOCBinOpCheck(Checked,
+                            CodeGenFunction::IOC_SHR_BITWIDTH,
+                            Ops.E, Ops.LHS, RHS,
+                            Ops.Ty->hasSignedIntegerRepresentation());
     } else
       EmitBinOpCheck(Checked, Ops);
   }

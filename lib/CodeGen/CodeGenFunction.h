@@ -1886,22 +1886,33 @@ public:
   ComplexPairTy EmitComplexPrePostIncDec(const UnaryOperator *E, LValue LV,
                                          bool isInc, bool isPre);
 
-  /// \brief Types of IOC checks emitted
+  /// \brief Types of IOC runtime checks emitted
   enum IOCCheckType {
-    IOC_ADD,        /* Overflow */
-    IOC_SUB,        /* Overflow */
-    IOC_MUL,        /* Overflow */
-    IOC_DIV_ERROR,  /* Div by 0, or INT_MIN / -1 */
-    IOC_REM_ERROR,  /* Rem by 0, or INT_MIN % -1 */
-    IOC_SHL_BITWIDTH,
-    IOC_SHL_STRICT,
-    IOC_SHR_BITWIDTH
+    IOC_ADD,          /* Overflow */
+    IOC_SUB,          /* Overflow */
+    IOC_MUL,          /* Overflow */
+    IOC_DIV_ERROR,    /* Div by 0, or INT_MIN / -1 */
+    IOC_REM_ERROR,    /* Rem by 0, or INT_MIN % -1 */
+    IOC_SHL_BITWIDTH, /* Shift by bitwidth or more */
+    IOC_SHL_STRICT,   /* Shift checks regarding sign bit */
+    IOC_SHR_BITWIDTH, /* Shift by bitwidth or more */
+    IOC_CONVERSION    /* Value lost in a conversion */
   };
 
-  /// EmitIOCCheck - Create a basic block that calls the IOC runtime,
-  /// and emit a conditional branch to it as well as branch to continue.
-  void EmitIOCCheck(llvm::Value* Checked, IOCCheckType CheckTy, const Expr *E,
-                    llvm::Value* LHS, llvm::Value* RHS, bool isSigned);
+  /// EmitIOCCheck - Conditionally branch to a new BB
+  /// that invokes the runtime with the specified arguments.
+  void EmitIOCCheck(llvm::Value *Checked,
+                   IOCCheckType IOCCT,
+                   SourceLocation SL,
+                   ArrayRef<llvm::Value *> Args);
+
+  /// EmitIOCBinOpCheck - Wrapper for EmitIOCCheck passing arguments
+  /// common to binary operations.
+  void EmitIOCBinOpCheck(llvm::Value *Checked,
+                         IOCCheckType IOCCT,
+                         const Expr *E,
+                         llvm::Value *LHS, llvm::Value *RHS,
+                         bool Signed);
 
   /// getIOCEncodedType - Return the Value* encoding the given type.
   /// For use in serializing the type to the IOC runtime.
