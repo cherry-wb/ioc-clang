@@ -1899,20 +1899,20 @@ public:
     IOC_CONVERSION    /* Value lost in a conversion */
   };
 
-  /// EmitIOCCheck - Conditionally branch to a new BB
+  /// EmitCheck - Conditionally branch to a new BB
   /// that invokes the runtime with the specified arguments.
-  void EmitIOCCheck(llvm::Value *Checked,
-                   IOCCheckType IOCCT,
-                   SourceLocation SL,
-                   ArrayRef<llvm::Value *> Args);
+  void EmitCheck(llvm::Value *Checked,
+                 IOCCheckType IOCCT,
+                 SourceLocation SL,
+                 ArrayRef<llvm::Value *> Args);
 
-  /// EmitIOCBinOpCheck - Wrapper for EmitIOCCheck passing arguments
+  /// EmitBinOpCheck - Wrapper for EmitIOCCheck passing arguments
   /// common to binary operations.
-  void EmitIOCBinOpCheck(llvm::Value *Checked,
-                         IOCCheckType IOCCT,
-                         const Expr *E,
-                         llvm::Value *LHS, llvm::Value *RHS,
-                         bool Signed);
+  void EmitBinOpCheck(llvm::Value *Checked,
+                      IOCCheckType IOCCT,
+                      const Expr *E,
+                      llvm::Value *LHS, llvm::Value *RHS,
+                      bool Signed);
 
   /// getIOCEncodedType - Return the Value* encoding the given type.
   /// For use in serializing the type to the IOC runtime.

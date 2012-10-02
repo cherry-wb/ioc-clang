@@ -1993,10 +1993,10 @@ void ScalarExprEmitter::EmitUndefinedBehaviorIntegerDivAndRemCheck(
     llvm::Value *Cond2 = Builder.CreateOr(LHSCmp, RHSCmp, "or");
     llvm::Value *Checked = Builder.CreateAnd(Cond1, Cond2, "and");
     if (CGF.CGM.getLangOpts().IOCSignedOverflowChecks)
-      CGF.EmitIOCBinOpCheck(Checked,
-                            isDiv ? CodeGenFunction::IOC_DIV_ERROR :
-                                    CodeGenFunction::IOC_REM_ERROR,
-                            Ops.E, Ops.LHS, Ops.RHS, true /* isSigned */);
+      CGF.EmitBinOpCheck(Checked,
+                         isDiv ? CodeGenFunction::IOC_DIV_ERROR :
+                                 CodeGenFunction::IOC_REM_ERROR,
+                         Ops.E, Ops.LHS, Ops.RHS, true /* isSigned */);
     else
       EmitBinOpCheck(Checked, Ops);
   } else {
@@ -2248,7 +2248,7 @@ void ScalarExprEmitter::EmitIntegerCastCheck(Value *Src, QualType SrcType,
     Args.push_back(Builder.CreateIntCast(Src, CGF.Int64Ty, SrcSigned));
     Args.push_back(llvm::ConstantInt::get(CGF.Int8Ty, SrcSigned));
 
-    CGF.EmitIOCCheck(CastCheckResult,
+    CGF.EmitCheck(CastCheckResult,
                      CodeGenFunction::IOC_CONVERSION, E->getExprLoc(),
                      Args);
   }
@@ -2292,16 +2292,16 @@ Value *ScalarExprEmitter::EmitIOCBinOp(const BinOpInfo &Ops) {
   Value *overflow = Builder.CreateExtractValue(resultAndOverflow, 1);
 
   // Branch to overflowBB in case of overflow
-  CGF.EmitIOCBinOpCheck(Builder.CreateNot(overflow), IOCCT, Ops.E,
-                        Ops.LHS, Ops.RHS,
-                        Ops.E->getType()->isSignedIntegerOrEnumerationType());
+  CGF.EmitBinOpCheck(Builder.CreateNot(overflow), IOCCT, Ops.E,
+                     Ops.LHS, Ops.RHS,
+                     Ops.E->getType()->isSignedIntegerOrEnumerationType());
   return result;
 }
 
-void CodeGenFunction::EmitIOCCheck(llvm::Value *Checked,
-                                   CodeGenFunction::IOCCheckType IOCCT,
-                                   SourceLocation SL,
-                                   ArrayRef<llvm::Value*> ExtraArgs) {
+void CodeGenFunction::EmitCheck(llvm::Value *Checked,
+                                CodeGenFunction::IOCCheckType IOCCT,
+                                SourceLocation SL,
+                                ArrayRef<llvm::Value*> ExtraArgs) {
   llvm::BasicBlock *Cont = createBasicBlock("cont");
   llvm::BasicBlock *RTCallBB = createBasicBlock("ioc_bb");
 
@@ -2373,11 +2373,11 @@ void CodeGenFunction::EmitIOCCheck(llvm::Value *Checked,
   EmitBlock(Cont);
 }
 
-void CodeGenFunction::EmitIOCBinOpCheck(llvm::Value *Checked,
-                                        CodeGenFunction::IOCCheckType IOCCT,
-                                        const Expr *E,
-                                        Value *LHS, Value *RHS,
-                                        bool Signed) {
+void CodeGenFunction::EmitBinOpCheck(llvm::Value *Checked,
+                                     CodeGenFunction::IOCCheckType IOCCT,
+                                     const Expr *E,
+                                     Value *LHS, Value *RHS,
+                                     bool Signed) {
   // Create string for this expression.
   // For now just get the opcode string, would be nice to
   // generate a much prettier string containing the snippet
@@ -2390,7 +2390,7 @@ void CodeGenFunction::EmitIOCBinOpCheck(llvm::Value *Checked,
       OpcodeStr = StringRef("unary ");
       OpcodeStr += UnaryOperator::getOpcodeStr(UO->getOpcode());
     } else {
-      llvm_unreachable("Unexpected Expr passed to EmitIOCBinOpCheck!");
+      llvm_unreachable("Unexpected Expr passed to EmitBinOpCheck!");
     }
   }
 
@@ -2402,7 +2402,7 @@ void CodeGenFunction::EmitIOCBinOpCheck(llvm::Value *Checked,
   Args.push_back(getIOCEncodedType(LHS->getType(), Signed));
   assert(LHS->getType() == RHS->getType());
 
-  EmitIOCCheck(Checked, IOCCT, E->getExprLoc(), Args);
+  EmitCheck(Checked, IOCCT, E->getExprLoc(), Args);
 }
 
 llvm::Value *CodeGenFunction::getIOCEncodedType(llvm::Type *T, bool isSigned) {
@@ -2720,10 +2720,10 @@ Value *ScalarExprEmitter::EmitShl(const BinOpInfo &Ops) {
     // twice.
     llvm::Value *Checked = Builder.CreateICmpULE(RHS, WidthMinusOne);
     if (IOCShift || IOCStrictShift)
-      CGF.EmitIOCBinOpCheck(Checked,
-                            CodeGenFunction::IOC_SHL_BITWIDTH,
-                            Ops.E, Ops.LHS, RHS,
-                            Ops.Ty->hasSignedIntegerRepresentation());
+      CGF.EmitBinOpCheck(Checked,
+                         CodeGenFunction::IOC_SHL_BITWIDTH,
+                          Ops.E, Ops.LHS, RHS,
+                          Ops.Ty->hasSignedIntegerRepresentation());
     else
       EmitBinOpCheck(Checked, Ops);
 
@@ -2747,9 +2747,9 @@ Value *ScalarExprEmitter::EmitShl(const BinOpInfo &Ops) {
       llvm::Value *Zero = llvm::ConstantInt::get(BitsShiftedOff->getType(), 0);
       llvm::Value *Checked = Builder.CreateICmpEQ(BitsShiftedOff, Zero);
       if (IOCStrictShift)
-        CGF.EmitIOCBinOpCheck(Checked,
-                              CodeGenFunction::IOC_SHL_STRICT, Ops.E, Ops.LHS,
-                              RHS, Ops.Ty->hasSignedIntegerRepresentation());
+        CGF.EmitBinOpCheck(Checked,
+                           CodeGenFunction::IOC_SHL_STRICT, Ops.E, Ops.LHS,
+                           RHS, Ops.Ty->hasSignedIntegerRepresentation());
       else
         EmitBinOpCheck(Checked, Ops);
     }
@@ -2773,10 +2773,10 @@ Value *ScalarExprEmitter::EmitShr(const BinOpInfo &Ops) {
     llvm::Value *WidthVal = llvm::ConstantInt::get(RHS->getType(), Width);
     llvm::Value *Checked = Builder.CreateICmpULT(RHS, WidthVal);
     if (IOCShiftCheck) {
-      CGF.EmitIOCBinOpCheck(Checked,
-                            CodeGenFunction::IOC_SHR_BITWIDTH,
-                            Ops.E, Ops.LHS, RHS,
-                            Ops.Ty->hasSignedIntegerRepresentation());
+      CGF.EmitBinOpCheck(Checked,
+                         CodeGenFunction::IOC_SHR_BITWIDTH,
+                         Ops.E, Ops.LHS, RHS,
+                         Ops.Ty->hasSignedIntegerRepresentation());
     } else
       EmitBinOpCheck(Checked, Ops);
   }
