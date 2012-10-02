@@ -2305,7 +2305,12 @@ void CodeGenFunction::EmitCheck(llvm::Value *Checked,
   llvm::BasicBlock *Cont = createBasicBlock("cont");
   llvm::BasicBlock *RTCallBB = createBasicBlock("ioc_bb");
 
-  Builder.CreateCondBr(Checked, Cont, RTCallBB);
+  // Add hint indicating check is expected to pass
+  Value *True = llvm::ConstantInt::getTrue(getLLVMContext());
+  Value *FExpect = CGM.getIntrinsic(llvm::Intrinsic::expect, True->getType());
+  Value *Expect = Builder.CreateCall2(FExpect, Checked, True, "");
+
+  Builder.CreateCondBr(Expect, Cont, RTCallBB);
   EmitBlock(RTCallBB);
 
   // Extract filename and line/column information from the SourceLocation
