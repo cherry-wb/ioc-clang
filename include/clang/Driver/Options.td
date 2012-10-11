@@ -327,6 +327,12 @@ def fcatch_undefined_behavior : Flag<["-"], "fcatch-undefined-behavior">, Flags<
 def fclasspath_EQ : Joined<["-"], "fclasspath=">, Group<f_Group>;
 def fcolor_diagnostics : Flag<["-"], "fcolor-diagnostics">, Group<f_Group>, Flags<[CC1Option]>,
   HelpText<"Use colors in diagnostics">;
+def fioc_signed : Flag <["-"], "fioc-signed">, Flags<[CC1Option]>,
+  Group<f_Group>, HelpText<"Generate runtime checks for signed integer overflows.">;
+def fioc_shifts : Flag <["-"], "fioc-shifts">, Flags<[CC1Option]>,
+  Group<f_Group>, HelpText<"Generate runtime checks for shifting more than bitwidth">;
+def fioc_strict_shifts : Flag <["-"], "fioc-strict-shifts">, Flags<[CC1Option]>,
+  Group<f_Group>, HelpText<"Generate runtime checks for stricter C99/C++11 shift rules">;
 def fcommon : Flag<["-"], "fcommon">, Group<f_Group>;
 def fcompile_resource_EQ : Joined<["-"], "fcompile-resource=">, Group<f_Group>;
 def fconstant_cfstrings : Flag<["-"], "fconstant-cfstrings">, Group<f_Group>;
