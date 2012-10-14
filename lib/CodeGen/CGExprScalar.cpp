@@ -2248,9 +2248,9 @@ void ScalarExprEmitter::EmitIntegerCastCheck(Value *Src, QualType SrcType,
     Args.push_back(Builder.CreateIntCast(Src, CGF.Int64Ty, SrcSigned));
     Args.push_back(llvm::ConstantInt::get(CGF.Int8Ty, SrcSigned));
 
-    CGF.EmitCheck(CastCheckResult,
-                     CodeGenFunction::IOC_CONVERSION, E->getExprLoc(),
-                     Args);
+    CGF.EmitCheck(Builder.CreateNot(CastCheckResult),
+                  CodeGenFunction::IOC_CONVERSION, E->getExprLoc(),
+                  Args);
   }
 }
 
